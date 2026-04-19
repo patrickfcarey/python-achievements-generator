@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# achievement-generator runtime artifacts
+data/cache/*.json
+data/cache/avatars/*
+data/output/*.png
+data/overrides/manual.yaml
+!data/cache/.gitkeep
+!data/cache/avatars/.gitkeep
+!data/output/.gitkeep
+assets/template/base_template.png

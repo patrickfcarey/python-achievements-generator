@@ -1,0 +1,48 @@
+# Manual override values for render-manual.
+#
+# Copy this file to data/overrides/manual.yaml, edit the values you want,
+# then run:
+#
+#   python -m src.main render-manual
+#
+# Only fields you include are used; omit any field to fall back to a default.
+# This file is never read automatically — it only takes effect when you run
+# the render-manual command explicitly.
+
+xbox:
+  username: YourGamertag
+  headline_value: 17045
+  headline_label: Gamerscore
+  substats:
+    - label: TA
+      value: 28073
+
+psn:
+  username: YourPsnId
+  headline_value: 42 Platinums
+  headline_label: Trophies
+  substats:
+    - label: platinum
+      value: 42
+    - label: gold
+      value: 210
+    - label: silver
+      value: 378
+    - label: bronze
+      value: 1150
+
+retroachievements:
+  username: YourRaUser
+  headline_value: 12345
+  headline_label: Hardcore Points
+  substats:
+    - label: RR
+      value: 4.2
+    - label: B
+      value: 87
+    - label: M
+      value: 23
+  extra_fields:
+    BeatenHardcoreAwardsCount: 87
+    CompletionAwardsCount: 23
+    MasteryAwardsCount: 23

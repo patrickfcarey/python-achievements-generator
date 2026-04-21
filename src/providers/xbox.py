@@ -46,26 +46,15 @@ class XboxProvider(Provider):
         return None
 
     def _extract_gamerscore(self, soup: BeautifulSoup) -> int | None:
-        # TrueAchievements labels the site's own score and the raw gamerscore
-        # separately. Prefer the row labelled with "Gamerscore".
-        for row in soup.select("li, tr, div"):
-            text = row.get_text(" ", strip=True)
-            if re.search(r"\bGamerscore\b", text, re.I):
-                n = parse_int(text.replace("Gamerscore", ""))
-                if n:
-                    return n
-        return parse_int(soup.get_text(" ", strip=True))
+        # TA marks the raw Gamerscore with an <i class="ta-gs ..."> icon.
+        return self._score_for_icon_class(soup, "ta-gs")
 
     def _extract_ta_score(self, soup: BeautifulSoup) -> int | None:
-        """TrueAchievements site score (TA). Usually 2-3x raw Gamerscore."""
-        for row in soup.select("li, tr, div, span"):
-            text = row.get_text(" ", strip=True)
-            if re.search(r"TrueAchievement\s*Score|\bTA\s*Score\b", text, re.I):
-                m = re.search(r"([\d,]{3,})", text)
-                if m:
-                    n = parse_int(m.group(1))
-                    if n is not None:
-                        return n
-        page = soup.get_text(" ", strip=True)
-        m = re.search(r"\bTA\b[^0-9]{0,12}([\d,]+)", page)
-        return parse_int(m.group(1)) if m else None
+        # TA marks its own site score with an <i class="ta-emb ..."> icon.
+        return self._score_for_icon_class(soup, "ta-emb")
+
+    def _score_for_icon_class(self, soup: BeautifulSoup, icon_class: str) -> int | None:
+        for span in soup.select("div.scores > span"):
+            if span.select_one(f"i.{icon_class}"):
+                return parse_int(span.get_text(" ", strip=True))
+        return None

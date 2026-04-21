@@ -6,6 +6,8 @@ import re
 
 _NUM_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 
+MISSING_VALUE_PLACEHOLDER = "--"
+
 
 def parse_int(text: str | None) -> int | None:
     if text is None:
@@ -47,3 +49,23 @@ def format_ratio(value, decimals: int = 2) -> str:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def format_headline_value(value) -> str:
+    """Format a headline value (int, float, str, or None) for display."""
+    if value is None:
+        return MISSING_VALUE_PLACEHOLDER
+    if isinstance(value, (int, float)):
+        return format_int(value)
+    return str(value)
+
+
+def format_substat_value(value) -> str:
+    """Format a substat value (int, float, bool, str, or None) for display."""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return format_ratio(value)
+    if isinstance(value, int):
+        return format_int(value)
+    return str(value)

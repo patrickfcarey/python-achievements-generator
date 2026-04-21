@@ -30,7 +30,7 @@ class RetroAchievementsProvider(Provider):
                     log.warning("retroachievements: API fetch failed (%s), falling back to scrape", exc)
 
         soup = self._get_soup(profile_url)
-        stats = PlatformStats(platform=self.platform, headline_label="Points")
+        stats = PlatformStats(platform=self.platform, headline_label="Hardcore Points")
         stats.username = self._extract_username(soup, profile_url)
         stats.avatar_url = self._extract_avatar(soup)
 
@@ -38,22 +38,28 @@ class RetroAchievementsProvider(Provider):
 
         softcore = self._find_number(page_text, r"(?:softcore|soft)\s*(?:points|score)?")
         hardcore = self._find_number(page_text, r"(?:hardcore|hard)\s*(?:points|score)?")
-        true_ratio = self._find_float(page_text, r"(?:site\s*)?ratio|true\s*ratio|retro\s*ratio")
+        true_ratio = self._find_float(page_text, r"(?:(?:site\s*)?ratio|true\s*ratio|retro\s*ratio)")
         masteries = self._find_number(page_text, r"master(?:ies|ed)")
         completions = self._find_number(page_text, r"completion(?:s|ist)?")
+        beaten = self._find_number(page_text, r"beaten")
 
-        total_points = hardcore if hardcore is not None else softcore
-        stats.headline_value = total_points
+        stats.headline_value = hardcore if hardcore is not None else softcore
 
+        # Field names mirror the RetroAchievements JSON API response so the
+        # cache and renderer speak one vocabulary. HTML scrape can't produce
+        # TotalTruePoints, so it's left unset here.
         stats.extra_fields = {
-            "softcore_points": softcore,
-            "hardcore_points": hardcore,
+            "TotalPoints": hardcore,
+            "TotalSoftcorePoints": softcore,
+            "TotalTruePoints": None,
+            "BeatenHardcoreAwardsCount": beaten,
+            "CompletionAwardsCount": completions,
+            "MasteryAwardsCount": masteries,
             "true_ratio": true_ratio,
-            "masteries": masteries,
-            "completions": completions,
         }
         stats.substats = [
-            SubStat(label="TR", value=true_ratio or 0.0),
+            SubStat(label="RR", value=true_ratio or 0.0),
+            SubStat(label="B", value=beaten or 0),
             SubStat(label="M", value=masteries or 0),
         ]
         if softcore is None and hardcore is None:
@@ -117,10 +123,10 @@ class RetroAchievementsProvider(Provider):
         true_ratio = None
         if true_points and hardcore:
             true_ratio = round(true_points / hardcore, 2)
-        masteries = parse_int(
-            awards_j.get("MasteryAwardsCount") or awards_j.get("TotalAwardsCount")
-        )
+        # Use the explicit field — do NOT fall through on falsy (0) values.
+        masteries = parse_int(awards_j.get("MasteryAwardsCount"))
         completions = parse_int(awards_j.get("CompletionAwardsCount"))
+        beaten = parse_int(awards_j.get("BeatenHardcoreAwardsCount"))
 
         avatar = profile_j.get("UserPic") or summary_j.get("UserPic")
         avatar_url = None
@@ -130,19 +136,24 @@ class RetroAchievementsProvider(Provider):
                 else f"https://retroachievements.org{avatar}"
             )
 
-        stats = PlatformStats(platform=self.platform, headline_label="Points")
+        stats = PlatformStats(platform=self.platform, headline_label="Hardcore Points")
         stats.username = profile_j.get("User") or summary_j.get("User") or username
         stats.avatar_url = avatar_url
         stats.headline_value = hardcore if hardcore is not None else softcore
+        # Field names mirror the RetroAchievements JSON API response so the
+        # cache and renderer speak one vocabulary.
         stats.extra_fields = {
-            "softcore_points": softcore,
-            "hardcore_points": hardcore,
+            "TotalPoints": hardcore,
+            "TotalSoftcorePoints": softcore,
+            "TotalTruePoints": true_points,
+            "BeatenHardcoreAwardsCount": beaten,
+            "CompletionAwardsCount": completions,
+            "MasteryAwardsCount": masteries,
             "true_ratio": true_ratio,
-            "masteries": masteries,
-            "completions": completions,
         }
         stats.substats = [
-            SubStat(label="TR", value=true_ratio or 0.0),
+            SubStat(label="RR", value=true_ratio or 0.0),
+            SubStat(label="B", value=beaten or 0),
             SubStat(label="M", value=masteries or 0),
         ]
         if hardcore is None and softcore is None:

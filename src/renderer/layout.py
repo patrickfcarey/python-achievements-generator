@@ -13,40 +13,108 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-CANVAS_W = 1500
-CANVAS_H = 450
+# ---------------------------------------------------------------------------
+# Canvas dimensions
+# ---------------------------------------------------------------------------
 
-OUTER_MARGIN = 14
-PANEL_GAP = 14
-PANEL_W = (CANVAS_W - 2 * OUTER_MARGIN - 2 * PANEL_GAP) // 3
-PANEL_H = CANVAS_H - 2 * OUTER_MARGIN
-PANEL_RADIUS = 14
-PANEL_BORDER_W = 3  # accent-color outline around each whole panel
+CANVAS_WIDTH_PX = 1500
+CANVAS_HEIGHT_PX = 450
 
-FOOTER_H = 48
-FOOTER_DIVIDER_W = 1
+# ---------------------------------------------------------------------------
+# Panel grid geometry
+# ---------------------------------------------------------------------------
 
-# colours
-BG_TOP = (12, 26, 52)
-BG_BOTTOM = (4, 10, 22)
-PANEL_FILL = (18, 28, 46)
-PANEL_FILL_INNER = (24, 34, 54)  # faint lift so the headline block pops
-TEXT_PRIMARY = (244, 248, 255)
-TEXT_SECONDARY = (178, 190, 210)
-TEXT_MUTED = (130, 144, 166)
+PANEL_OUTER_MARGIN_PX = 14
+PANEL_GAP_PX = 14
+PANEL_WIDTH_PX = (CANVAS_WIDTH_PX - 2 * PANEL_OUTER_MARGIN_PX - 2 * PANEL_GAP_PX) // 3
+PANEL_HEIGHT_PX = CANVAS_HEIGHT_PX - 2 * PANEL_OUTER_MARGIN_PX
+PANEL_CORNER_RADIUS_PX = 14
+PANEL_BORDER_WIDTH_PX = 3  # accent-color outline around each whole panel
 
+# ---------------------------------------------------------------------------
+# Footer strip
+# ---------------------------------------------------------------------------
+
+FOOTER_HEIGHT_PX = 48
+FOOTER_DIVIDER_THICKNESS_PX = 1
+FOOTER_DIVIDER_HORIZONTAL_INSET_PX = 10  # divider is inset from panel edges
+
+# ---------------------------------------------------------------------------
+# Panel interior layout
+# ---------------------------------------------------------------------------
+
+PANEL_INTERIOR_PAD_X_PX = 18           # left/right padding inside each panel body
+PANEL_HEADER_TOP_OFFSET_PX = 14        # gap from top of panel body to header row
+AVATAR_DIAMETER_PX = 85
+AVATAR_TO_NAME_GAP_PX = 12             # horizontal gap between avatar right edge and name block
+
+HEADLINE_BLOCK_TOP_MARGIN_PX = 10      # gap between header row bottom and headline block top
+HEADLINE_BLOCK_HEIGHT_PX = 96
+HEADLINE_BLOCK_HORIZONTAL_BLEED_PX = 2  # lifted block extends 2px beyond panel interior padding
+HEADLINE_BLOCK_CORNER_RADIUS_PX = 12
+
+LABEL_STRIP_TOP_PADDING_PX = 4         # top padding inside the headline block for the label text
+LABEL_STRIP_HEIGHT_PX = 26             # vertical space allocated to the label
+
+STATS_ROW_TOP_MARGIN_PX = 10           # gap between headline block bottom and stats row top
+STATS_ROW_BOTTOM_INSET_PX = 10         # gap between stats row bottom and footer divider
+
+# ---------------------------------------------------------------------------
+# Colours
+# ---------------------------------------------------------------------------
+
+BACKGROUND_GRADIENT_TOP_RGB = (12, 26, 52)
+BACKGROUND_GRADIENT_BOTTOM_RGB = (4, 10, 22)
+PANEL_FILL_RGB = (18, 28, 46)
+PANEL_FILL_INNER_RGB = (24, 34, 54)    # faint lift so the headline block pops
+TEXT_PRIMARY_RGB = (244, 248, 255)
+TEXT_SECONDARY_RGB = (178, 190, 210)
+TEXT_MUTED_RGB = (130, 144, 166)
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases (remove once all callers are updated)
+# ---------------------------------------------------------------------------
+
+CANVAS_W = CANVAS_WIDTH_PX
+CANVAS_H = CANVAS_HEIGHT_PX
+OUTER_MARGIN = PANEL_OUTER_MARGIN_PX
+PANEL_GAP = PANEL_GAP_PX
+PANEL_W = PANEL_WIDTH_PX
+PANEL_H = PANEL_HEIGHT_PX
+PANEL_RADIUS = PANEL_CORNER_RADIUS_PX
+PANEL_BORDER_W = PANEL_BORDER_WIDTH_PX
+FOOTER_H = FOOTER_HEIGHT_PX
+FOOTER_DIVIDER_W = FOOTER_DIVIDER_THICKNESS_PX
+BG_TOP = BACKGROUND_GRADIENT_TOP_RGB
+BG_BOTTOM = BACKGROUND_GRADIENT_BOTTOM_RGB
+PANEL_FILL = PANEL_FILL_RGB
+PANEL_FILL_INNER = PANEL_FILL_INNER_RGB
+TEXT_PRIMARY = TEXT_PRIMARY_RGB
+TEXT_SECONDARY = TEXT_SECONDARY_RGB
+TEXT_MUTED = TEXT_MUTED_RGB
+
+
+# ---------------------------------------------------------------------------
+# Per-platform themes
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Theme:
     key: str
-    display_name: str        # subtitle under username (plain text run)
-    display_prefix: str = ""  # optional colored prefix drawn before display_name
+    display_name: str          # subtitle under username (plain text run)
+    display_prefix: str = ""   # optional colored prefix drawn before display_name
     accent: tuple[int, int, int] = (255, 255, 255)
     accent_deep: tuple[int, int, int] = (0, 0, 0)
     avatar_ring: tuple[int, int, int] = (255, 255, 255)
     footer_label: str = ""
     footer_glyph: str = ""
     label_color: tuple[int, int, int] = (255, 255, 255)
+    # Per-platform pixel nudges applied by the header row renderer.
+    # avatar_offset shifts the avatar around its own center so resizing
+    # doesn't drag the image off-axis. (delta_x, delta_y) in pixels.
+    avatar_offset: tuple[int, int] = (-14, -15)
+    # name_offset_x shifts the username + subtitle text block rightward.
+    name_offset_x: int = 0
 
 
 THEMES: dict[str, Theme] = {
@@ -69,6 +137,8 @@ THEMES: dict[str, Theme] = {
         footer_label="PlayStation",
         footer_glyph="PS",
         label_color=(185, 210, 245),
+        avatar_offset=(0, -15),
+        name_offset_x=15,
     ),
     "retroachievements": Theme(
         key="retroachievements",
@@ -84,69 +154,129 @@ THEMES: dict[str, Theme] = {
 }
 
 
-def panel_box(index: int) -> tuple[int, int, int, int]:
-    """Return the bounding box for the nth panel (0-based, left to right)."""
-    x0 = OUTER_MARGIN + index * (PANEL_W + PANEL_GAP)
-    y0 = OUTER_MARGIN
-    return (x0, y0, x0 + PANEL_W, y0 + PANEL_H)
+# ---------------------------------------------------------------------------
+# Geometry helpers
+# ---------------------------------------------------------------------------
+
+def panel_box(panel_index: int) -> tuple[int, int, int, int]:
+    """Return the bounding box (left, top, right, bottom) for the nth panel (0-based)."""
+    panel_left = PANEL_OUTER_MARGIN_PX + panel_index * (PANEL_WIDTH_PX + PANEL_GAP_PX)
+    panel_top = PANEL_OUTER_MARGIN_PX
+    return (panel_left, panel_top, panel_left + PANEL_WIDTH_PX, panel_top + PANEL_HEIGHT_PX)
 
 
 @dataclass(frozen=True)
 class PanelRegions:
+    """All sub-regions of one panel, precomputed for the renderer.
+
+    Every value is a (left, top, right, bottom) bounding box. The renderer
+    reads these rather than recomputing geometry inline, so all layout
+    decisions stay in this module.
+    """
     panel: tuple[int, int, int, int]
     body: tuple[int, int, int, int]
-    header: tuple[int, int, int, int]     # avatar + name block
+    header: tuple[int, int, int, int]          # avatar + name block combined
     avatar: tuple[int, int, int, int]
     name_block: tuple[int, int, int, int]
     label: tuple[int, int, int, int]
-    headline_block: tuple[int, int, int, int]  # label+headline lifted panel
+    headline_block: tuple[int, int, int, int]  # lifted background behind label + headline
     headline: tuple[int, int, int, int]
     stats: tuple[int, int, int, int]
     footer_divider: tuple[int, int, int, int]  # thin accent line above footer
     footer: tuple[int, int, int, int]
 
 
-def panel_regions(index: int) -> PanelRegions:
-    x0, y0, x1, y1 = panel_box(index)
-    footer = (x0, y1 - FOOTER_H, x1, y1)
-    footer_divider = (x0 + 10, footer[1] - 1, x1 - 10, footer[1])
-    body = (x0, y0, x1, footer[1])
+def panel_regions(panel_index: int) -> PanelRegions:
+    """Compute all sub-region bounding boxes for the panel at the given index."""
+    panel_left, panel_top, panel_right, panel_bottom = panel_box(panel_index)
 
-    pad_x = 18
-    inner_l = body[0] + pad_x
-    inner_r = body[2] - pad_x
+    footer_top = panel_bottom - FOOTER_HEIGHT_PX
+    footer_box = (panel_left, footer_top, panel_right, panel_bottom)
+    footer_divider_box = (
+        panel_left + FOOTER_DIVIDER_HORIZONTAL_INSET_PX,
+        footer_top - FOOTER_DIVIDER_THICKNESS_PX,
+        panel_right - FOOTER_DIVIDER_HORIZONTAL_INSET_PX,
+        footer_top,
+    )
+    body_box = (panel_left, panel_top, panel_right, footer_top)
 
-    # header: avatar + name block
-    header_top = body[1] + 14
-    avatar_size = 85  # +10% over prior 77
-    header = (inner_l, header_top, inner_r, header_top + avatar_size)
-    avatar = (inner_l, header_top, inner_l + avatar_size, header_top + avatar_size)
-    name_block = (avatar[2] + 12, header_top - 2, inner_r, header[3] + 2)
+    interior_left = body_box[0] + PANEL_INTERIOR_PAD_X_PX
+    interior_right = body_box[2] - PANEL_INTERIOR_PAD_X_PX
 
-    # headline block (label + big value lifted background)
-    block_top = header[3] + 10
-    block_h = 96
-    headline_block = (inner_l - 2, block_top, inner_r + 2, block_top + block_h)
-    label = (headline_block[0], block_top + 4, headline_block[2], block_top + 30)
-    headline = (headline_block[0], label[3], headline_block[2], block_top + block_h - 4)
+    # Header row: avatar circle on the left, name + subtitle on the right
+    header_top = body_box[1] + PANEL_HEADER_TOP_OFFSET_PX
+    avatar_bottom = header_top + AVATAR_DIAMETER_PX
+    header_box = (interior_left, header_top, interior_right, avatar_bottom)
+    avatar_box = (interior_left, header_top, interior_left + AVATAR_DIAMETER_PX, avatar_bottom)
+    name_block_box = (
+        avatar_box[2] + AVATAR_TO_NAME_GAP_PX,
+        header_top - 2,
+        interior_right,
+        avatar_bottom + 2,
+    )
 
-    # stats row fills the remaining space down to the footer divider
-    stats_top = headline_block[3] + 10
-    stats = (inner_l, stats_top, inner_r, body[3] - 10)
+    # Headline block: lifted background containing the label strip + headline value
+    headline_block_top = header_box[3] + HEADLINE_BLOCK_TOP_MARGIN_PX
+    headline_block_box = (
+        interior_left - HEADLINE_BLOCK_HORIZONTAL_BLEED_PX,
+        headline_block_top,
+        interior_right + HEADLINE_BLOCK_HORIZONTAL_BLEED_PX,
+        headline_block_top + HEADLINE_BLOCK_HEIGHT_PX,
+    )
+    label_box = (
+        headline_block_box[0],
+        headline_block_top + LABEL_STRIP_TOP_PADDING_PX,
+        headline_block_box[2],
+        headline_block_top + LABEL_STRIP_TOP_PADDING_PX + LABEL_STRIP_HEIGHT_PX,
+    )
+    headline_box = (
+        headline_block_box[0],
+        label_box[3],
+        headline_block_box[2],
+        headline_block_top + HEADLINE_BLOCK_HEIGHT_PX - LABEL_STRIP_TOP_PADDING_PX,
+    )
+
+    # Stats row: fills remaining vertical space between headline block and footer divider
+    stats_top = headline_block_box[3] + STATS_ROW_TOP_MARGIN_PX
+    stats_box = (
+        interior_left,
+        stats_top,
+        interior_right,
+        body_box[3] - STATS_ROW_BOTTOM_INSET_PX,
+    )
 
     return PanelRegions(
-        panel=(x0, y0, x1, y1),
-        body=body,
-        header=header,
-        avatar=avatar,
-        name_block=name_block,
-        label=label,
-        headline_block=headline_block,
-        headline=headline,
-        stats=stats,
-        footer_divider=footer_divider,
-        footer=footer,
+        panel=panel_box(panel_index),
+        body=body_box,
+        header=header_box,
+        avatar=avatar_box,
+        name_block=name_block_box,
+        label=label_box,
+        headline_block=headline_block_box,
+        headline=headline_box,
+        stats=stats_box,
+        footer_divider=footer_divider_box,
+        footer=footer_box,
     )
 
 
 PLATFORM_ORDER = ("xbox", "psn", "retroachievements")
+
+# ---------------------------------------------------------------------------
+# Bounding-box utilities
+# ---------------------------------------------------------------------------
+
+Box = tuple[int, int, int, int]
+
+
+def offset_box(box: Box, dx: int, dy: int) -> Box:
+    """Return `box` shifted by (dx, dy) without changing its size."""
+    x0, y0, x1, y1 = box
+    return (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+
+
+def split_box_horizontally(box: Box) -> tuple[Box, Box]:
+    """Split `box` at its horizontal midpoint into (left_half, right_half)."""
+    x0, y0, x1, y1 = box
+    mid = (x0 + x1) // 2
+    return (x0, y0, mid, y1), (mid, y0, x1, y1)

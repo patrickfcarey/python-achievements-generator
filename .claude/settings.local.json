@@ -17,7 +17,18 @@
       "Bash(curl -sI https://www.trueachievements.com/gamer/newerest5543 -A 'Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0.0.0 Safari/537.36' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' -H 'Accept-Language: en-US,en;q=0.9')",
       "Bash(python3 -m src.main generate)",
       "Bash(python3 *)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(playwright install *)",
+      "Bash(BANNER_RA_COLUMNS=4 python3 -m src.main --output out/banner_ra4.png render)",
+      "Bash(pip list *)",
+      "Bash(mutmut --help)",
+      "Bash(mutmut run *)",
+      "Bash(awk 'length\\($0\\) < 500 && !/Generating mutants/ && !/Running stats/ && !/Running/' /home/pacarey/.claude/projects/-mnt-c-Github-python-achievements-generator/0a47f8cd-0d63-4eb5-9169-f56e6f479b79/tool-results/b13brmzxx.txt)",
+      "Bash(awk '{print $NF}')",
+      "Bash(grep -nA 3 \"x_cache_path__mutmut_1\\\\b\\\\|x_cache_path__mutmut_orig\\\\b\\\\|x_cache_path__mutmut_mutants\\\\b\" /mnt/c/Github/python-achievements-generator/mutants/src/cache.py)",
+      "Bash(awk 'length\\($0\\) < 500 && !/Generating mutants/ && !/Running stats/ && !/Running mutation tests/ && !/Running/')",
+      "Bash(curl -s -A \"Mozilla/5.0 \\(X11; Linux x86_64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/126.0.0.0 Safari/537.36\" https://www.trueachievements.com/gamer/Newerest5543)",
+      "Bash(python *)"
     ]
   }
 }

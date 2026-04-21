@@ -1,4 +1,16 @@
-"""Top-level renderer: backdrop -> per-platform panels -> PNG."""
+"""Top-level renderer: composites all platform panels onto the banner canvas.
+
+Pipeline:
+  load_or_build_template()   →  RGBA canvas (gradient bg + panel shapes)
+  render()                   →  iterates over platforms, calls _render_panel()
+  _render_panel()            →  calls five row-drawing functions in order
+  _draw_*_row()              →  each draws one horizontal strip of a panel
+
+Every platform panel (xbox / psn / retroachievements) traces through the same
+five row functions. The label and headline rows delegate to a shared
+``_draw_text_cells_in_row`` helper, so a 1-cell xbox label and a 2-cell RA
+label are the same function call — only the cell list differs.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,21 +20,24 @@ from PIL import Image, ImageDraw
 
 from ..cache import find_cached_avatar
 from ..models import PlatformStats, SubStat
-from ..services.normalize import format_int, format_ratio
-from . import draw as D
+from ..services.normalize import format_headline_value, format_substat_value
+from . import draw
 from .layout import (
-    BG_BOTTOM,
-    BG_TOP,
-    CANVAS_H,
-    CANVAS_W,
-    PANEL_BORDER_W,
-    PANEL_FILL,
-    PANEL_FILL_INNER,
-    PANEL_RADIUS,
+    BACKGROUND_GRADIENT_BOTTOM_RGB,
+    BACKGROUND_GRADIENT_TOP_RGB,
+    Box,
+    CANVAS_HEIGHT_PX,
+    CANVAS_WIDTH_PX,
+    HEADLINE_BLOCK_CORNER_RADIUS_PX,
+    PANEL_BORDER_WIDTH_PX,
+    PANEL_CORNER_RADIUS_PX,
+    PANEL_FILL_INNER_RGB,
+    PANEL_FILL_RGB,
     PLATFORM_ORDER,
-    TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    TEXT_PRIMARY_RGB,
+    TEXT_SECONDARY_RGB,
     THEMES,
+    offset_box,
     panel_regions,
 )
 
@@ -30,379 +45,607 @@ log = logging.getLogger(__name__)
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "assets" / "template" / "base_template.png"
 
+# ---------------------------------------------------------------------------
+# Typography — font sizes and bounding-box padding per row
+# ---------------------------------------------------------------------------
+
+# Header row
+USERNAME_FONT_START_PX = 30
+USERNAME_FONT_MAX_HEIGHT_PX = 32
+SUBTITLE_FONT_PX = 22
+SUBTITLE_VERTICAL_OFFSET_FROM_USERNAME_PX = 40
+SUBTITLE_PREFIX_TO_NAME_GAP_PX = 8
+
+# Label row
+LABEL_FONT_START_PX = 26
+LABEL_FONT_MAX_HEIGHT_PX = 26
+LABEL_HORIZONTAL_PADDING_PX = 8
+RA_LABEL_HORIZONTAL_PADDING_PX = 10
+
+# Headline row
+HEADLINE_FONT_START_PX = 62
+HEADLINE_HORIZONTAL_INSET_PX = 16
+HEADLINE_VERTICAL_INSET_PX = 10
+HEADLINE_OPTICAL_CENTER_NUDGE_PX = 4
+RA_HEADLINE_FONT_START_PX = 48
+
+# Stats row
+STAT_ICON_SIZE_PX = 35
+STAT_ICON_TO_VALUE_GAP_PX = 15
+STAT_VALUE_MAX_HEIGHT_PX = 40
+STAT_VALUE_FONT_START_PX = 44
+STAT_VALUE_FONT_MIN_PX = 22
+STAT_VALUE_HORIZONTAL_PADDING_PX = 20
+STAT_STACK_MIN_TOP_INSET_PX = 2
+RA_PILL_BADGE_GAP_PX = 8
+RA_PILL_BADGE_HEIGHT_SCALE = 1.08
+
+# Footer row
+FOOTER_HORIZONTAL_PADDING_PX = 16
+FOOTER_ICON_VERTICAL_INSET_PX = 8
+FOOTER_ICON_WIDTH_TO_HEIGHT_RATIO = 3.2
+FOOTER_ICON_TO_LABEL_GAP_PX = 10
+FOOTER_PROCEDURAL_ICON_TO_LABEL_GAP_PX = 8
+FOOTER_LABEL_FONT_PX = 20
+
+# ---------------------------------------------------------------------------
+# RA-specific strings, colors, and field keys
+# ---------------------------------------------------------------------------
+
+RA_HARDCORE_POINTS_LABEL_TEXT = "Hardcore Points"
+RA_RETROPOINTS_LABEL_TEXT = "RetroPoints"
+RA_HARDCORE_POINTS_LABEL_COLOR = (222, 180, 56)  # gold
+RA_RETROPOINTS_LABEL_COLOR = (208, 128, 44)       # amber
+
+RA_TOTAL_POINTS_EXTRA_FIELD_KEY = "TotalPoints"
+RA_TRUE_POINTS_EXTRA_FIELD_KEY = "TotalTruePoints"
+
+DEFAULT_USERNAME_FALLBACK = "Player"
+STAT_ICON_DEFAULT_COLOR = (205, 210, 220)
+
+# Maps lowercase substat label keys to display text shown on RA pill badges
+_RA_LABEL_DISPLAY_TEXT: dict[str, str] = {
+    "rr": "RETRORATIO",
+    "b":  "BEATEN",
+    "m":  "MASTERED",
+    "ta": "TRUEACHIEVEMENT SCORE",
+}
+
+# Maps lowercase substat label keys to pill fill colors for RA badges
+_RA_BADGE_FILL_COLORS: dict[str, tuple[int, int, int]] = {
+    "rr": (208, 128, 44),   # RetroRatio — amber
+    "b":  (210, 85, 85),    # Beaten — warm red
+    "m":  (156, 196, 80),   # Mastered — green
+    "ta": (80, 170, 200),   # TrueAchievement Score — teal
+}
+
+# Maps lowercase stat label keys to procedural icon colors (xbox / fallback)
+_PROCEDURAL_ICON_COLORS: dict[str, tuple[int, int, int]] = {
+    "platinum":    (160, 210, 240),
+    "gold":        (230, 190, 60),
+    "silver":      (200, 205, 215),
+    "bronze":      (200, 120, 70),
+    "trophy":      (230, 190, 60),
+    "completions": (230, 190, 60),
+}
+
+# Stat labels that render as a star icon rather than a trophy
+_STAR_ICON_LABEL_KEYS = frozenset({"star", "stars", "masteries"})
+
+
+# ---------------------------------------------------------------------------
+# Template
+# ---------------------------------------------------------------------------
 
 def load_or_build_template() -> Image.Image:
+    """Return the banner background template as an RGBA image.
+
+    If a saved template exists at TEMPLATE_PATH and matches the canvas size,
+    it is returned directly. If it exists but has the wrong size (user
+    supplied custom artwork), it is cover-fit and warped to align grid lines.
+    If no template exists, a procedural one is generated and saved for reuse.
+    """
     if TEMPLATE_PATH.exists():
         try:
-            tpl = Image.open(TEMPLATE_PATH).convert("RGBA")
-            if tpl.size == (CANVAS_W, CANVAS_H):
-                return tpl
+            template_image = Image.open(TEMPLATE_PATH).convert("RGBA")
+            if template_image.size == (CANVAS_WIDTH_PX, CANVAS_HEIGHT_PX):
+                return template_image
             log.info(
                 "template: fitting user artwork %s to canvas %dx%d",
-                tpl.size, CANVAS_W, CANVAS_H,
+                template_image.size, CANVAS_WIDTH_PX, CANVAS_HEIGHT_PX,
             )
-            return _fit_to_canvas(tpl, CANVAS_W, CANVAS_H)
-        except OSError as exc:
-            log.warning("template: failed to open %s: %s", TEMPLATE_PATH, exc)
+            return _fit_to_canvas(template_image, CANVAS_WIDTH_PX, CANVAS_HEIGHT_PX)
+        except OSError as error:
+            log.warning("template: failed to open %s: %s", TEMPLATE_PATH, error)
 
-    tpl = build_base_template()
+    procedural_template = build_base_template()
     TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tpl.save(TEMPLATE_PATH)
+    procedural_template.save(TEMPLATE_PATH)
     log.info("template: wrote base template to %s", TEMPLATE_PATH)
-    return tpl
+    return procedural_template
 
 
-def _fit_to_canvas(img: Image.Image, w: int, h: int) -> Image.Image:
-    """Cover-fit + piecewise vertical warp + center crop so the template's
-    grid lines land at the canvas positions needed to align with existing
-    content (separators between gamertag/headline/stats/footer rows).
+def _fit_to_canvas(source_image: Image.Image, target_width: int, target_height: int) -> Image.Image:
+    """Cover-fit + piecewise vertical warp + center crop.
 
-    Original template (1024 tall) has 3 horizontal grid lines at y ≈ 423, 660, 724.
-    Line 1 is aligned as-is; lines 2 and 3 get pulled up by 150 / 30 canvas px
-    respectively via piecewise vertical resampling of the inter-line bands."""
-    src_w, src_h = img.size
-    scale = max(w / src_w, h / src_h)
-    new_w = int(round(src_w * scale))
-    new_h = int(round(src_h * scale))
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+    Aligns the template's three horizontal grid lines to the canvas positions
+    that match the panel layout (separators between gamertag/headline/stats/footer).
 
-    line1 = int(423 * scale)
-    line2 = int(660 * scale)
-    line3 = int(724 * scale)
+    Original template (1024 px tall) has grid lines at y ≈ 423, 660, 724.
+    Line 1 is preserved; lines 2 and 3 are pulled up by 150 px and 30 px
+    respectively via piecewise band resampling.
+    """
+    # Y-positions of the three horizontal grid lines in the un-scaled source template.
+    SOURCE_GRID_LINE_1_Y = 423
+    SOURCE_GRID_LINE_2_Y = 660
+    SOURCE_GRID_LINE_3_Y = 724
+    # Shift the crop window downward so the template's visual midpoint aligns
+    # with the banner's content rows rather than the exact geometric center.
+    CROP_BASELINE_SHIFT_PX = 35
+    # Pull each grid line upward via piecewise warp so panel separators in the
+    # source artwork align with the banner's layout.
+    BAND_1_COMPRESSION_PX = 120
+    BAND_2_COMPRESSION_PX = 30
 
-    y_shift = 35  # template baseline offset (positive = crop from lower in source)
-    crop_top = (new_h - h) // 2 + y_shift
-    crop_top = max(0, min(crop_top, new_h - h))
+    source_width, source_height = source_image.size
+    cover_scale = max(target_width / source_width, target_height / source_height)
+    scaled_width = int(round(source_width * cover_scale))
+    scaled_height = int(round(source_height * cover_scale))
+    source_image = source_image.resize((scaled_width, scaled_height), Image.LANCZOS)
 
-    # target source y for each line so the resulting canvas position is correct
-    target_line2 = crop_top + (line2 - crop_top) - 120  # up 150 canvas px
-    target_line3 = crop_top + (line3 - crop_top) - 30   # up 30 canvas px
+    grid_line_1_y = int(SOURCE_GRID_LINE_1_Y * cover_scale)
+    grid_line_2_y = int(SOURCE_GRID_LINE_2_Y * cover_scale)
+    grid_line_3_y = int(SOURCE_GRID_LINE_3_Y * cover_scale)
 
-    warped = Image.new("RGBA", (new_w, new_h))
-    # band 0: above line 1 — unchanged
-    warped.paste(img.crop((0, 0, new_w, line1)), (0, 0))
-    # band 1: line 1 → line 2 — compress to new height
-    band_h = max(1, target_line2 - line1)
-    b = img.crop((0, line1, new_w, line2)).resize((new_w, band_h), Image.LANCZOS)
-    warped.paste(b, (0, line1))
-    # band 2: line 2 → line 3 — resize to span to new line 3
-    band_h = max(1, target_line3 - target_line2)
-    b = img.crop((0, line2, new_w, line3)).resize((new_w, band_h), Image.LANCZOS)
-    warped.paste(b, (0, target_line2))
-    # band 3: below line 3 — shifted up, original pixel height
-    b = img.crop((0, line3, new_w, new_h))
-    warped.paste(b, (0, target_line3))
+    crop_top = (scaled_height - target_height) // 2 + CROP_BASELINE_SHIFT_PX
+    crop_top = max(0, min(crop_top, scaled_height - target_height))
 
-    x0 = (new_w - w) // 2
-    return warped.crop((x0, crop_top, x0 + w, crop_top + h))
+    target_grid_line_2_y = crop_top + (grid_line_2_y - crop_top) - BAND_1_COMPRESSION_PX
+    target_grid_line_3_y = crop_top + (grid_line_3_y - crop_top) - BAND_2_COMPRESSION_PX
+
+    warped = Image.new("RGBA", (scaled_width, scaled_height))
+    warped.paste(source_image.crop((0, 0, scaled_width, grid_line_1_y)), (0, 0))
+
+    band_1_height = max(1, target_grid_line_2_y - grid_line_1_y)
+    warped.paste(
+        source_image.crop((0, grid_line_1_y, scaled_width, grid_line_2_y)).resize(
+            (scaled_width, band_1_height), Image.LANCZOS,
+        ),
+        (0, grid_line_1_y),
+    )
+
+    band_2_height = max(1, target_grid_line_3_y - target_grid_line_2_y)
+    warped.paste(
+        source_image.crop((0, grid_line_2_y, scaled_width, grid_line_3_y)).resize(
+            (scaled_width, band_2_height), Image.LANCZOS,
+        ),
+        (0, target_grid_line_2_y),
+    )
+
+    warped.paste(
+        source_image.crop((0, grid_line_3_y, scaled_width, scaled_height)),
+        (0, target_grid_line_3_y),
+    )
+
+    crop_left = (scaled_width - target_width) // 2
+    return warped.crop((crop_left, crop_top, crop_left + target_width, crop_top + target_height))
 
 
 def build_base_template() -> Image.Image:
-    """Procedural backdrop: gradient sky + panel-colour glows + panel bodies."""
-    glows = [THEMES[p].accent for p in PLATFORM_ORDER]
-    bg = D.build_background((CANVAS_W, CANVAS_H), BG_TOP, BG_BOTTOM, accent_colors=glows)
-    draw = ImageDraw.Draw(bg)
-
-    for idx, platform in enumerate(PLATFORM_ORDER):
+    """Build the procedural backdrop: gradient sky + panel glows + panel bodies."""
+    accent_glow_colors = [THEMES[platform].accent for platform in PLATFORM_ORDER]
+    background = draw.build_background(
+        (CANVAS_WIDTH_PX, CANVAS_HEIGHT_PX),
+        BACKGROUND_GRADIENT_TOP_RGB,
+        BACKGROUND_GRADIENT_BOTTOM_RGB,
+        accent_colors=accent_glow_colors,
+    )
+    pen = ImageDraw.Draw(background)
+    for panel_index, platform in enumerate(PLATFORM_ORDER):
         theme = THEMES[platform]
-        regions = panel_regions(idx)
-
-        # solid dark panel body (includes the footer area — the footer is dark
-        # in the example, not a colored strip)
-        D.rounded_rect(draw, regions.panel, radius=PANEL_RADIUS, fill=PANEL_FILL)
-
-        # faint lifted block behind the label + headline area
-        D.rounded_rect(draw, regions.headline_block, radius=12, fill=PANEL_FILL_INNER)
-
-        # thin accent-color divider line above the footer
-        draw.rectangle(regions.footer_divider, fill=theme.accent)
-
-        # full accent-color border around the whole panel
-        D.rounded_rect(
-            draw,
-            regions.panel,
-            radius=PANEL_RADIUS,
-            outline=theme.accent,
-            width=PANEL_BORDER_W,
+        regions = panel_regions(panel_index)
+        draw.rounded_rect(pen, regions.panel, radius=PANEL_CORNER_RADIUS_PX, fill=PANEL_FILL_RGB)
+        draw.rounded_rect(pen, regions.headline_block, radius=HEADLINE_BLOCK_CORNER_RADIUS_PX, fill=PANEL_FILL_INNER_RGB)
+        pen.rectangle(regions.footer_divider, fill=theme.accent)
+        draw.rounded_rect(
+            pen, regions.panel,
+            radius=PANEL_CORNER_RADIUS_PX, outline=theme.accent, width=PANEL_BORDER_WIDTH_PX,
         )
+    return background
 
-    return bg
 
+# ---------------------------------------------------------------------------
+# Public render entry point
+# ---------------------------------------------------------------------------
 
 def render(
     stats_by_platform: dict[str, PlatformStats],
     cache_dir: Path,
     output_path: Path,
 ) -> Path:
-    canvas = load_or_build_template().copy()
-    draw = ImageDraw.Draw(canvas)
+    """Render all platform panels onto the banner and save to `output_path`.
 
-    for idx, platform in enumerate(PLATFORM_ORDER):
+    Missing platforms are skipped rather than crashing — the banner renders
+    with however many panels have data. Returns the output path on success.
+    """
+    canvas = load_or_build_template().copy()
+    pen = ImageDraw.Draw(canvas)
+    for panel_index, platform in enumerate(PLATFORM_ORDER):
         stats = stats_by_platform.get(platform)
         if stats is None:
             continue
-        _render_panel(canvas, draw, idx, platform, stats, cache_dir)
-
+        _render_panel(canvas, pen, panel_index, platform, stats, cache_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(output_path, "PNG")
     log.info("render: wrote %s", output_path)
     return output_path
 
 
-def _render_panel(canvas, draw, index, platform, stats, cache_dir):
+def _render_panel(
+    canvas: Image.Image,
+    pen: ImageDraw.ImageDraw,
+    panel_index: int,
+    platform: str,
+    stats: PlatformStats,
+    cache_dir: Path,
+) -> None:
+    """Draw all five rows of one platform panel onto the canvas."""
     theme = THEMES[platform]
-    regions = panel_regions(index)
-
-    _draw_header(canvas, draw, regions, theme, stats, cache_dir)
-    _draw_label_and_headline(draw, regions, theme, stats)
-    _draw_stats_row(canvas, draw, regions.stats, stats.substats, platform)
-    _draw_footer(canvas, draw, regions, theme)
-
-
-def _draw_header(canvas, draw, regions, theme, stats, cache_dir):
-    # Shift the avatar around its own center so growing the size doesn't drag
-    # the image off-center. dx/dy are the requested nudges from default.
-    dx = 0 if stats.platform == "psn" else -14
-    dy = -15
-    ax0, ay0, ax1, ay1 = regions.avatar
-    cx = (ax0 + ax1) // 2 + dx
-    cy = (ay0 + ay1) // 2 + dy
-    half = (ax1 - ax0) // 2
-    avatar_box = (cx - half, cy - half, cx - half + (ax1 - ax0), cy - half + (ay1 - ay0))
-    avatar_img = _load_avatar(cache_dir, stats.platform)
-    if avatar_img is not None:
-        D.paste_circle_avatar(canvas, avatar_img, avatar_box, theme.avatar_ring)
-    else:
-        D.draw_placeholder_avatar(draw, avatar_box, theme.avatar_ring)
-
-    nx0, ny0, nx1, ny1 = regions.name_block
-    if stats.platform == "psn":
-        nx0 += 15  # per-user request: nudge PSN name+network text right
-    username = stats.username or "Player"
-    name_font = D.fit_font(draw, username, max_w=nx1 - nx0, max_h=32, start=30, bold=True)
-    D.draw_text(draw, (nx0, ny0), username, name_font, TEXT_PRIMARY, anchor="la")
-
-    sub_font = D.get_font(22, bold=True)
-    sub_y = ny0 + 40
-    cursor_x = nx0
-    if theme.display_prefix:
-        D.draw_text(draw, (cursor_x, sub_y), theme.display_prefix, sub_font, theme.accent, anchor="la")
-        pw, _ = D.text_size(draw, theme.display_prefix, sub_font)
-        cursor_x += pw + 8
-    D.draw_text(
-        draw, (cursor_x, sub_y), theme.display_name, sub_font, TEXT_SECONDARY, anchor="la"
-    )
+    regions = panel_regions(panel_index)
+    _draw_header_row(canvas, pen, regions, theme, stats, cache_dir)
+    _draw_label_row(pen, regions, theme, stats)
+    _draw_headline_row(pen, regions, stats)
+    _draw_stats_row(canvas, pen, regions.stats, stats.substats, platform)
+    _draw_footer_row(canvas, pen, regions, theme)
 
 
-def _draw_label_and_headline(draw, regions, theme, stats):
-    if stats.platform == "retroachievements":
-        _draw_ra_dual_headline(draw, regions, stats)
+# ---------------------------------------------------------------------------
+# Shared helper: N centered-text cells in a row, one fitted font across all
+# ---------------------------------------------------------------------------
+
+def _draw_text_cells_in_row(
+    pen: ImageDraw.ImageDraw,
+    row_box: Box,
+    cells: list[tuple[str, tuple[int, int, int]]],
+    *,
+    font_start_px: int,
+    font_max_h_px: int,
+    horizontal_padding_px: int,
+    vertical_nudge_px: int = 0,
+    shadow: bool = False,
+) -> None:
+    """Render N evenly-divided centered-text cells into `row_box`.
+
+    A single font size is chosen that fits the widest cell's text, so every
+    cell uses the same font. Drives both the label row (1 cell xbox/psn,
+    2 cells RA) and the headline row (same).
+    """
+    if not cells:
         return
-    label = stats.headline_label or ""
-    label_font = D.fit_font(
-        draw, label, max_w=regions.label[2] - regions.label[0] - 8, max_h=22, start=22, bold=True
-    )
-    lx = (regions.label[0] + regions.label[2]) // 2
-    ly = (regions.label[1] + regions.label[3]) // 2
-    D.draw_text(draw, (lx, ly), label, label_font, theme.label_color, anchor="mm")
-
-    headline = _format_headline(stats)
-    hx = (regions.headline[0] + regions.headline[2]) // 2
-    hy = (regions.headline[1] + regions.headline[3]) // 2 + 4
-    head_font = D.fit_font(
-        draw,
-        headline,
-        max_w=regions.headline[2] - regions.headline[0] - 16,
-        max_h=regions.headline[3] - regions.headline[1] - 10,
-        start=62,
+    x0, y0, x1, y1 = row_box
+    cell_width = (x1 - x0) / len(cells)
+    widest_text = max((text for text, _ in cells), key=len)
+    font = draw.fit_font(
+        pen, widest_text,
+        max_w=int(cell_width) - horizontal_padding_px,
+        max_h=font_max_h_px,
+        start=font_start_px,
         bold=True,
     )
-    D.draw_text(draw, (hx, hy), headline, head_font, TEXT_PRIMARY, anchor="mm", shadow=True)
+    center_y = (y0 + y1) // 2 + vertical_nudge_px
+    for cell_index, (text, color) in enumerate(cells):
+        center_x = int(x0 + cell_width * (cell_index + 0.5))
+        draw.draw_text(pen, (center_x, center_y), text, font, color, anchor="mm", shadow=shadow)
 
 
-def _draw_ra_dual_headline(draw, regions, stats):
-    """RA headline: two-column Softcore / Hardcore totals replacing the usual
-    single Points value."""
-    extras = stats.extra_fields or {}
-    sc = extras.get("softcore_points")
-    hc = extras.get("hardcore_points")
-    sc_color = _ra_badge_colors()["sc"]
-    hc_color = _ra_badge_colors()["hc"]
+# ---------------------------------------------------------------------------
+# Row 1: header (avatar + username + network subtitle)
+# ---------------------------------------------------------------------------
 
-    lx0, ly0, lx1, ly1 = regions.label
-    label_cy = (ly0 + ly1) // 2
-    col_w_lbl = (lx1 - lx0) // 2
-    left_lx = lx0 + col_w_lbl // 2
-    right_lx = lx0 + col_w_lbl + col_w_lbl // 2
-    label_font = D.get_font(20, bold=True)
-    D.draw_text(draw, (left_lx, label_cy), "Softcore", label_font, sc_color, anchor="mm")
-    D.draw_text(draw, (right_lx, label_cy), "Hardcore", label_font, hc_color, anchor="mm")
+def _draw_header_row(
+    canvas: Image.Image,
+    pen: ImageDraw.ImageDraw,
+    regions,
+    theme,
+    stats: PlatformStats,
+    cache_dir: Path,
+) -> None:
+    """Circular avatar on the left, username and network subtitle on the right.
 
-    hx0, hy0, hx1, hy1 = regions.headline
-    col_w_val = (hx1 - hx0) // 2
-    left_hx = hx0 + col_w_val // 2
-    right_hx = hx0 + col_w_val + col_w_val // 2
-    val_cy = (hy0 + hy1) // 2 + 4
+    ``theme.avatar_offset`` shifts the avatar around its own center so
+    resizing doesn't drag it off-axis. ``theme.name_offset_x`` nudges the
+    username text block rightward.
+    """
+    avatar_box = offset_box(regions.avatar, *theme.avatar_offset)
+    avatar_image = _load_avatar_image(cache_dir, stats.platform)
+    if avatar_image is not None:
+        draw.paste_circle_avatar(canvas, avatar_image, avatar_box, theme.avatar_ring)
+    else:
+        draw.draw_placeholder_avatar(pen, avatar_box, theme.avatar_ring)
 
-    sc_text = format_int(sc) if isinstance(sc, (int, float)) else "--"
-    hc_text = format_int(hc) if isinstance(hc, (int, float)) else "--"
-    probe = sc_text if len(sc_text) >= len(hc_text) else hc_text
-    val_font = D.fit_font(
-        draw,
-        probe,
-        max_w=col_w_val - 16,
-        max_h=hy1 - hy0 - 10,
-        start=48,
+    name_left, name_top, name_right, _ = regions.name_block
+    name_left += theme.name_offset_x
+    username = stats.username or DEFAULT_USERNAME_FALLBACK
+    username_font = draw.fit_font(
+        pen, username,
+        max_w=name_right - name_left,
+        max_h=USERNAME_FONT_MAX_HEIGHT_PX,
+        start=USERNAME_FONT_START_PX,
         bold=True,
     )
-    D.draw_text(draw, (left_hx, val_cy), sc_text, val_font, TEXT_PRIMARY, anchor="mm", shadow=True)
-    D.draw_text(draw, (right_hx, val_cy), hc_text, val_font, TEXT_PRIMARY, anchor="mm", shadow=True)
+    draw.draw_text(pen, (name_left, name_top), username, username_font, TEXT_PRIMARY_RGB, anchor="la")
+
+    subtitle_font = draw.get_font(SUBTITLE_FONT_PX, bold=True)
+    subtitle_y = name_top + SUBTITLE_VERTICAL_OFFSET_FROM_USERNAME_PX
+    cursor_x = name_left
+    if theme.display_prefix:
+        draw.draw_text(pen, (cursor_x, subtitle_y), theme.display_prefix, subtitle_font, theme.accent, anchor="la")
+        prefix_width, _ = draw.text_size(pen, theme.display_prefix, subtitle_font)
+        cursor_x += prefix_width + SUBTITLE_PREFIX_TO_NAME_GAP_PX
+    draw.draw_text(pen, (cursor_x, subtitle_y), theme.display_name, subtitle_font, TEXT_SECONDARY_RGB, anchor="la")
 
 
-def _draw_stats_row(canvas, draw, box, substats: list[SubStat], platform: str):
-    """Each substat is rendered as a vertical stack: icon/badge on top, number
-    directly beneath, centered in its slot."""
+# ---------------------------------------------------------------------------
+# Row 2: label strip (1 cell for xbox/psn, 2 cells for RA)
+# ---------------------------------------------------------------------------
+
+def _draw_label_row(
+    pen: ImageDraw.ImageDraw,
+    regions,
+    theme,
+    stats: PlatformStats,
+) -> None:
+    """One centered label (xbox/psn) or two side-by-side labels (RA)."""
+    if stats.platform == "retroachievements":
+        cells = [
+            (RA_HARDCORE_POINTS_LABEL_TEXT, RA_HARDCORE_POINTS_LABEL_COLOR),
+            (RA_RETROPOINTS_LABEL_TEXT, RA_RETROPOINTS_LABEL_COLOR),
+        ]
+        font_start_px = LABEL_FONT_START_PX - 2
+        horizontal_padding_px = RA_LABEL_HORIZONTAL_PADDING_PX
+    else:
+        cells = [(stats.headline_label or "", theme.label_color)]
+        font_start_px = LABEL_FONT_START_PX
+        horizontal_padding_px = LABEL_HORIZONTAL_PADDING_PX
+    _draw_text_cells_in_row(
+        pen, regions.label, cells,
+        font_start_px=font_start_px,
+        font_max_h_px=LABEL_FONT_MAX_HEIGHT_PX,
+        horizontal_padding_px=horizontal_padding_px,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Row 3: headline value (1 cell for xbox/psn, 2 cells for RA)
+# ---------------------------------------------------------------------------
+
+def _draw_headline_row(
+    pen: ImageDraw.ImageDraw,
+    regions,
+    stats: PlatformStats,
+) -> None:
+    """One big headline value (xbox/psn) or two side-by-side values (RA).
+
+    Headline text is drawn with a drop shadow and nudged slightly below the
+    geometric center, because large numerals with ascenders read as too high
+    otherwise.
+    """
+    if stats.platform == "retroachievements":
+        extra = stats.extra_fields or {}
+        cells = [
+            (format_headline_value(extra.get(RA_TOTAL_POINTS_EXTRA_FIELD_KEY)), TEXT_PRIMARY_RGB),
+            (format_headline_value(extra.get(RA_TRUE_POINTS_EXTRA_FIELD_KEY)), TEXT_PRIMARY_RGB),
+        ]
+        font_start_px = RA_HEADLINE_FONT_START_PX
+    else:
+        cells = [(format_headline_value(stats.headline_value), TEXT_PRIMARY_RGB)]
+        font_start_px = HEADLINE_FONT_START_PX
+    _draw_text_cells_in_row(
+        pen, regions.headline, cells,
+        font_start_px=font_start_px,
+        font_max_h_px=(regions.headline[3] - regions.headline[1]) - HEADLINE_VERTICAL_INSET_PX,
+        horizontal_padding_px=HEADLINE_HORIZONTAL_INSET_PX,
+        vertical_nudge_px=HEADLINE_OPTICAL_CENTER_NUDGE_PX,
+        shadow=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Row 4: stats (icons + values)
+# ---------------------------------------------------------------------------
+
+def _draw_stats_row(
+    canvas: Image.Image,
+    pen: ImageDraw.ImageDraw,
+    stats_box: Box,
+    substats: list[SubStat],
+    platform: str,
+) -> None:
+    """N stat cells, each an icon stacked above a numeric value.
+
+    For RetroAchievements (all pill badges), slot centers are recomputed from
+    actual pill widths so the visible gap between adjacent pills is equal
+    regardless of pill width. All other platforms use evenly-spaced centers.
+    """
     if not substats:
         return
-    x0, y0, x1, y1 = box
-    slots = len(substats)
-    slot_w = (x1 - x0) / slots
-    available_h = y1 - y0
+    stats_left, stats_top, stats_right, stats_bottom = stats_box
+    slot_width = (stats_right - stats_left) / len(substats)
+    slot_centers = (
+        _compute_ra_pill_centers(pen, stats_left, stats_right, substats)
+        if platform == "retroachievements" else None
+    ) or [int(stats_left + slot_width * (i + 0.5)) for i in range(len(substats))]
 
-    icon_size = 35  # +10% over prior 32
-    vgap = 15  # +25% over prior 12
-    max_value_h = 40
-
-    stack_h = icon_size + vgap + max_value_h
-    top_y = y0 + max(2, (available_h - stack_h) // 2)
-
-    for i, s in enumerate(substats):
-        slot_cx = int(x0 + slot_w * (i + 0.5))
-        icon_cy = top_y + icon_size // 2
-        _draw_stat_icon(canvas, draw, s.label, slot_cx, icon_cy, icon_size, platform)
-
-        value_text = _format_stat_value(s)
-        value_font = D.fit_font(
-            draw, value_text,
-            max_w=int(slot_w - 20),
-            max_h=max_value_h,
-            start=44,
-            minimum=22,
-            bold=True,
+    for i, substat in enumerate(substats):
+        cell_box = (
+            int(stats_left + slot_width * i), stats_top,
+            int(stats_left + slot_width * (i + 1)), stats_bottom,
         )
-        D.draw_text(
-            draw,
-            (slot_cx, top_y + icon_size + vgap),
-            value_text,
-            value_font,
-            TEXT_PRIMARY,
-            anchor="mt",
-        )
+        _draw_stat_cell(canvas, pen, cell_box, slot_centers[i], slot_width, substat, platform)
 
 
-def _draw_stat_icon(canvas, draw, label: str, cx: int, cy: int, size: int, platform: str):
-    key = (label or "").lower()
-    # RA uses labeled pill badges for softcore / hardcore / true ratio / mastery
-    badge = _ra_badge_colors().get(key)
-    if badge is not None:
-        display = _RA_LABEL_DISPLAY.get(key, label.upper())
-        D.draw_label_badge(draw, cx, cy, int(size * 1.08), display, fill=badge)
+def _draw_stat_cell(
+    canvas: Image.Image,
+    pen: ImageDraw.ImageDraw,
+    cell_box: Box,
+    slot_center_x: int,
+    slot_width: float,
+    substat: SubStat,
+    platform: str,
+) -> None:
+    """Icon on top, numeric value directly beneath. Stack vertically centered in the cell."""
+    _, cell_top, _, cell_bottom = cell_box
+    stack_height = STAT_ICON_SIZE_PX + STAT_ICON_TO_VALUE_GAP_PX + STAT_VALUE_MAX_HEIGHT_PX
+    stack_top_y = cell_top + max(STAT_STACK_MIN_TOP_INSET_PX, (cell_bottom - cell_top - stack_height) // 2)
+
+    icon_center_y = stack_top_y + STAT_ICON_SIZE_PX // 2
+    _draw_stat_icon(canvas, pen, substat.label, slot_center_x, icon_center_y, STAT_ICON_SIZE_PX, platform)
+
+    value_text = format_substat_value(substat.value)
+    value_font = draw.fit_font(
+        pen, value_text,
+        max_w=int(slot_width - STAT_VALUE_HORIZONTAL_PADDING_PX),
+        max_h=STAT_VALUE_MAX_HEIGHT_PX,
+        start=STAT_VALUE_FONT_START_PX,
+        minimum=STAT_VALUE_FONT_MIN_PX,
+        bold=True,
+    )
+    value_top_y = stack_top_y + STAT_ICON_SIZE_PX + STAT_ICON_TO_VALUE_GAP_PX
+    draw.draw_text(pen, (slot_center_x, value_top_y), value_text, value_font, TEXT_PRIMARY_RGB, anchor="mt")
+
+
+def _draw_stat_icon(
+    canvas: Image.Image,
+    pen: ImageDraw.ImageDraw,
+    substat_label: str,
+    center_x: int,
+    center_y: int,
+    icon_size_px: int,
+    platform: str,
+) -> None:
+    """Draw one stat icon. Three rendering modes, tried in priority order:
+
+    1) RA pill badge — label key matches a known RetroAchievements badge.
+    2) Bundled PNG asset — e.g. assets/icons/psn/platinum.png.
+    3) Procedural fallback — star (mastery labels) or trophy.
+    """
+    label_key = (substat_label or "").lower()
+
+    badge_color = _RA_BADGE_FILL_COLORS.get(label_key)
+    if badge_color is not None:
+        badge_text = _RA_LABEL_DISPLAY_TEXT.get(label_key, substat_label.upper())
+        badge_height = int(icon_size_px * RA_PILL_BADGE_HEIGHT_SCALE)
+        draw.draw_label_badge(pen, center_x, center_y, badge_height, badge_text, fill_color=badge_color)
         return
-    # User-supplied PNG takes priority (e.g. assets/icons/psn/platinum.png)
-    real = D.load_stat_icon(platform, key)
-    if real is not None:
-        D.paste_centered_icon(canvas, real, cx, cy, size)
+
+    asset_icon = draw.load_stat_icon(platform, label_key)
+    if asset_icon is not None:
+        draw.paste_centered_icon(canvas, asset_icon, center_x, center_y, icon_size_px)
         return
-    if key in ("star", "stars", "masteries"):
-        D.draw_star(draw, cx, cy, size, filled=True)
+
+    if label_key in _STAR_ICON_LABEL_KEYS:
+        draw.draw_star(pen, center_x, center_y, icon_size_px, filled=True)
         return
-    color = _icon_colors(platform).get(key, (205, 210, 220))
-    D.draw_trophy(draw, cx, cy, size, color)
+    fallback_color = _PROCEDURAL_ICON_COLORS.get(label_key, STAT_ICON_DEFAULT_COLOR)
+    draw.draw_trophy(pen, center_x, center_y, icon_size_px, fallback_color)
 
 
-def _format_stat_value(s: SubStat) -> str:
-    if isinstance(s.value, bool):
-        return str(s.value)
-    if isinstance(s.value, float):
-        return format_ratio(s.value)
-    if isinstance(s.value, int):
-        return format_int(s.value)
-    return str(s.value)
+# ---------------------------------------------------------------------------
+# Row 4 helpers — RA pill layout with equal visible gaps
+# ---------------------------------------------------------------------------
+
+def _compute_ra_pill_centers(
+    pen: ImageDraw.ImageDraw,
+    stats_left: int,
+    stats_right: int,
+    substats: list[SubStat],
+) -> list[int] | None:
+    """x-centers that give RA_PILL_BADGE_GAP_PX between adjacent pills.
+
+    Returns None if any substat is not a known RA pill, so the caller falls
+    back to evenly-spaced slot centers. Pills are horizontally centered as
+    a group within the stats box.
+    """
+    badge_height = int(STAT_ICON_SIZE_PX * RA_PILL_BADGE_HEIGHT_SCALE)
+    pill_widths: list[int] = []
+    for substat in substats:
+        label_key = (substat.label or "").lower()
+        if label_key not in _RA_BADGE_FILL_COLORS:
+            return None
+        display_text = _RA_LABEL_DISPLAY_TEXT.get(label_key, substat.label.upper())
+        pill_widths.append(_measure_pill_badge_width(pen, display_text, badge_height))
+
+    total_group_width = sum(pill_widths) + RA_PILL_BADGE_GAP_PX * (len(pill_widths) - 1)
+    cursor_x = (stats_left + stats_right) // 2 - total_group_width // 2
+    centers: list[int] = []
+    for width in pill_widths:
+        centers.append(cursor_x + width // 2)
+        cursor_x += width + RA_PILL_BADGE_GAP_PX
+    return centers
 
 
-def _draw_footer(canvas, draw, regions, theme):
-    """Dark footer with a platform icon on the left and the platform name
-    centered. Uses assets/icons/<platform>.png if present, otherwise a
-    procedural glyph. The thin accent divider above is painted in
-    build_base_template."""
-    x0, y0, x1, y1 = regions.footer
-    pad = 16
-    cy = (y0 + y1) // 2
-    icon_h = (y1 - y0) - 8  # ~15% larger footer logos
-    icon_box = (x0 + pad, cy - icon_h // 2,
-                x0 + pad + int(icon_h * 3.2), cy + icon_h // 2)
+def _measure_pill_badge_width(pen: ImageDraw.ImageDraw, display_text: str, height_px: int) -> int:
+    """Pill-badge width without drawing it — mirrors draw.draw_label_badge."""
+    probe_font_size = max(10, int(height_px * draw.PILL_BADGE_PROBE_FONT_SIZE_RATIO))
+    probe_font = draw.get_font(probe_font_size, bold=True)
+    measured_text_width, _ = draw.text_size(pen, display_text, probe_font)
+    return max(
+        height_px + draw.PILL_BADGE_MIN_WIDTH_OVER_HEIGHT_PX,
+        measured_text_width + int(height_px * draw.PILL_BADGE_HORIZONTAL_PAD_RATIO),
+    )
 
-    real = D.load_platform_icon(theme.key)
-    if real is not None:
-        icon_bbox = D.paste_platform_icon(canvas, real, icon_box)
-        label_area_l = icon_bbox[2] + 10
+
+# ---------------------------------------------------------------------------
+# Row 5: footer (platform icon + platform name)
+# ---------------------------------------------------------------------------
+
+def _draw_footer_row(
+    canvas: Image.Image,
+    pen: ImageDraw.ImageDraw,
+    regions,
+    theme,
+) -> None:
+    """Platform icon on the left, platform name centered to its right.
+
+    Uses the user-supplied PNG at assets/icons/<platform>.png when present,
+    otherwise falls back to a procedural glyph. The icon's rendered width
+    determines where the label text area begins.
+    """
+    footer_left, footer_top, footer_right, footer_bottom = regions.footer
+    footer_center_y = (footer_top + footer_bottom) // 2
+    icon_height = (footer_bottom - footer_top) - FOOTER_ICON_VERTICAL_INSET_PX
+    icon_left = footer_left + FOOTER_HORIZONTAL_PADDING_PX
+    icon_top = footer_center_y - icon_height // 2
+    icon_bottom = footer_center_y + icon_height // 2
+
+    platform_png_icon = draw.load_platform_icon(theme.key)
+    if platform_png_icon is not None:
+        icon_box = (icon_left, icon_top,
+                    icon_left + int(icon_height * FOOTER_ICON_WIDTH_TO_HEIGHT_RATIO), icon_bottom)
+        rendered_bbox = draw.paste_platform_icon(canvas, platform_png_icon, icon_box)
+        label_area_left_x = rendered_bbox[2] + FOOTER_ICON_TO_LABEL_GAP_PX
     else:
-        # procedural fallback: use a square glyph
-        glyph_box = (x0 + pad, cy - icon_h // 2,
-                     x0 + pad + icon_h, cy + icon_h // 2)
-        D.draw_platform_icon(draw, theme.key, glyph_box, theme.accent)
-        label_area_l = glyph_box[2] + 8
+        glyph_box = (icon_left, icon_top, icon_left + icon_height, icon_bottom)
+        draw.draw_platform_icon(pen, theme.key, glyph_box, theme.accent)
+        label_area_left_x = glyph_box[2] + FOOTER_PROCEDURAL_ICON_TO_LABEL_GAP_PX
 
-    label_area_r = x1 - pad
-    font = D.get_font(20, bold=True)
-    cx = (label_area_l + label_area_r) // 2
-    D.draw_text(draw, (cx, cy), theme.footer_label, font, TEXT_PRIMARY, anchor="mm")
+    label_area_right_x = footer_right - FOOTER_HORIZONTAL_PADDING_PX
+    label_font = draw.get_font(FOOTER_LABEL_FONT_PX, bold=True)
+    label_center_x = (label_area_left_x + label_area_right_x) // 2
+    draw.draw_text(pen, (label_center_x, footer_center_y), theme.footer_label, label_font, TEXT_PRIMARY_RGB, anchor="mm")
 
 
-def _load_avatar(cache_dir: Path, platform: str) -> Image.Image | None:
-    p = find_cached_avatar(cache_dir, platform)
-    if not p:
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
+
+def _load_avatar_image(cache_dir: Path, platform: str) -> Image.Image | None:
+    """Return the cached avatar image for `platform`, or None on failure."""
+    avatar_path = find_cached_avatar(cache_dir, platform)
+    if not avatar_path:
         return None
     try:
-        return Image.open(p)
-    except OSError as exc:
-        log.warning("avatar: cannot open %s: %s", p, exc)
+        return Image.open(avatar_path)
+    except OSError as error:
+        log.warning("avatar: cannot open %s: %s", avatar_path, error)
         return None
-
-
-def _format_headline(stats: PlatformStats) -> str:
-    value = stats.headline_value
-    if value is None:
-        return "--"
-    if isinstance(value, (int, float)):
-        return format_int(value)
-    return str(value)
-
-
-def _icon_colors(platform: str) -> dict[str, tuple[int, int, int]]:
-    return {
-        "platinum": (160, 210, 240),
-        "gold": (230, 190, 60),
-        "silver": (200, 205, 215),
-        "bronze": (200, 120, 70),
-        "trophy": (230, 190, 60),
-        "completions": (230, 190, 60),
-    }
-
-
-_RA_LABEL_DISPLAY = {
-    "tr": "TRUE RATIO",
-    "m": "MASTERY",
-    "ta": "TRUEACHIEVEMENT SCORE",
-}
-
-
-def _ra_badge_colors() -> dict[str, tuple[int, int, int]]:
-    """Per-stat badge colours for the RetroAchievements pill labels."""
-    return {
-        "sc": (110, 140, 180),   # softcore — slate blue
-        "hc": (222, 180, 56),    # hardcore — gold
-        "tr": (208, 128, 44),    # true ratio — amber
-        "m":  (156, 196, 80),    # mastery — green/gold
-        "ta": (80, 170, 200),    # TrueAchievement Score — teal
-    }

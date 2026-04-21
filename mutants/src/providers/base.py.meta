@@ -1,0 +1,22 @@
+{
+    "exit_code_by_key": {
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_1": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_2": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_3": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_4": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_5": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_6": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_7": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_8": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_9": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_10": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_11": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_12": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_13": 0,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_14": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_15": 0,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_16": 1,
+        "src.providers.base.x\u01c1Provider\u01c1_get_soup__mutmut_17": 1
+    },
+    "hash_by_function_name": {}
+}

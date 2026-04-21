@@ -29,7 +29,11 @@ class PsnProvider(Provider):
         stats.substats = [SubStat(label=tier, value=counts.get(tier, 0)) for tier in _TIERS]
 
         plat = counts.get("platinum", 0)
-        stats.headline_value = f"{plat:,} Platinums" if plat is not None else None
+        if plat is not None:
+            platinum_label = "Platinum" if plat == 1 else "Platinums"
+            stats.headline_value = f"{plat:,} {platinum_label}"
+        else:
+            stats.headline_value = None
 
         if not any(counts.values()):
             raise ProviderError("psn: no trophy counts found")
